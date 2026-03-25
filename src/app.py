@@ -81,8 +81,11 @@ DEFAULT_ACTIVITIES = {
 DB_PATH = current_dir / "activities.db"
 
 
-def get_connection():
-    connection = sqlite3.connect(DB_PATH)
+def get_connection(autocommit: bool = False):
+    # isolation_level=None enables autocommit mode, required for explicit
+    # BEGIN IMMEDIATE / COMMIT / ROLLBACK transaction control.
+    isolation_level = None if autocommit else ""
+    connection = sqlite3.connect(DB_PATH, isolation_level=isolation_level)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -208,13 +211,15 @@ def get_activities():
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    connection = sqlite3.connect(DB_PATH, isolation_level=None)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    # autocommit=True (isolation_level=None) is required so we can use an
+    # explicit BEGIN IMMEDIATE transaction.  In autocommit mode the standard
+    # connection.commit()/rollback() helpers are no-ops, so SQL statements
+    # are used directly for transaction control.
+    connection = get_connection(autocommit=True)
     cursor = connection.cursor()
     try:
-        # Use BEGIN IMMEDIATE to acquire a write lock upfront, making the
-        # capacity check and insert atomic and safe under concurrent signups.
+        # Acquire a write lock upfront so the capacity check and insert are
+        # atomic, preventing duplicate signups under concurrent requests.
         cursor.execute("BEGIN IMMEDIATE")
 
         cursor.execute(
@@ -223,7 +228,6 @@ def signup_for_activity(activity_name: str, email: str):
         )
         activity = cursor.fetchone()
         if activity is None:
-            cursor.execute("ROLLBACK")
             raise HTTPException(status_code=404, detail="Activity not found")
 
         cursor.execute(
@@ -236,7 +240,6 @@ def signup_for_activity(activity_name: str, email: str):
         )
         existing_signup = cursor.fetchone()
         if existing_signup is not None:
-            cursor.execute("ROLLBACK")
             raise HTTPException(
                 status_code=400,
                 detail="Student is already signed up"
@@ -248,7 +251,6 @@ def signup_for_activity(activity_name: str, email: str):
         )
         registration_count = cursor.fetchone()["count"]
         if registration_count >= activity["max_participants"]:
-            cursor.execute("ROLLBACK")
             raise HTTPException(
                 status_code=400,
                 detail="Activity is already full"
