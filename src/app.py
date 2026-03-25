@@ -142,7 +142,7 @@ def initialize_database():
                     )
                     cursor.execute(
                         """
-                        INSERT INTO registrations (activity_name, student_email)
+                        INSERT OR IGNORE INTO registrations (activity_name, student_email)
                         VALUES (?, ?)
                         """,
                         (activity_name, participant_email),
