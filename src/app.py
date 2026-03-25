@@ -208,15 +208,22 @@ def get_activities():
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    with get_connection() as connection:
-        cursor = connection.cursor()
+    connection = sqlite3.connect(DB_PATH, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    cursor = connection.cursor()
+    try:
+        # Use BEGIN IMMEDIATE to acquire a write lock upfront, making the
+        # capacity check and insert atomic and safe under concurrent signups.
+        cursor.execute("BEGIN IMMEDIATE")
 
         cursor.execute(
-            "SELECT name FROM activities WHERE name = ?",
+            "SELECT max_participants FROM activities WHERE name = ?",
             (activity_name,),
         )
         activity = cursor.fetchone()
         if activity is None:
+            cursor.execute("ROLLBACK")
             raise HTTPException(status_code=404, detail="Activity not found")
 
         cursor.execute(
@@ -229,9 +236,22 @@ def signup_for_activity(activity_name: str, email: str):
         )
         existing_signup = cursor.fetchone()
         if existing_signup is not None:
+            cursor.execute("ROLLBACK")
             raise HTTPException(
                 status_code=400,
                 detail="Student is already signed up"
+            )
+
+        cursor.execute(
+            "SELECT COUNT(*) AS count FROM registrations WHERE activity_name = ?",
+            (activity_name,),
+        )
+        registration_count = cursor.fetchone()["count"]
+        if registration_count >= activity["max_participants"]:
+            cursor.execute("ROLLBACK")
+            raise HTTPException(
+                status_code=400,
+                detail="Activity is already full"
             )
 
         cursor.execute(
@@ -245,7 +265,13 @@ def signup_for_activity(activity_name: str, email: str):
             """,
             (activity_name, email),
         )
-        connection.commit()
+        cursor.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            cursor.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
 
     return {"message": f"Signed up {email} for {activity_name}"}
 
